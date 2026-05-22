@@ -1,0 +1,3 @@
+# LiveSplit ASL scripts are a Windows-targeted format. Pin to CRLF so editing
+# from inside WSL (or any Unix-y editor) doesn't introduce noisy LF/CRLF diffs.
+*.asl text eol=crlf
