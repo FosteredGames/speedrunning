@@ -44,7 +44,7 @@ startup
 {
     // Bump on every edit so you can confirm in DebugView that LiveSplit
     // reloaded the new file. Format: "YYYY-MM-DDTHH:MMZ (git-shorthash)".
-    vars.ScriptVersion = "2026-05-23T08:50Z (31efcb3+state-log-always)";
+    vars.ScriptVersion = "2026-05-23T09:15Z (31efcb3+wider-he-range)";
     print("[KT] script loaded -- version " + vars.ScriptVersion);
 
     settings.Add("split_missions", true,  "Split when all missions complete (key obtained)");
@@ -978,7 +978,8 @@ startup
         };
 
         int[] heCandidates  = new int[] {
-            0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x28, 0x2C, 0x30, 0x34, 0x38, 0x3C, 0x40, 0x44, 0x48, 0x4C, 0x50, 0x58
+            0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x28, 0x2C, 0x30, 0x34, 0x38, 0x3C, 0x40, 0x44, 0x48, 0x4C, 0x50, 0x54, 0x58, 0x5C,
+            0x60, 0x64, 0x68, 0x6C, 0x70, 0x74, 0x78, 0x7C
         };
         // CONFIRMED via byte dump: MonoClass+0xA4 is runtime_info, +0x04 within
         // runtime_info is the first domain's MonoVTable* (max_domain at +0).
@@ -1176,6 +1177,17 @@ startup
                             if (glFOff >= 0) try { globalRefVal = (long)(uint)proc.ReadValue<int>((IntPtr)(mSbase + glFOff)); } catch {}
                             if (callerVal    == 0 || looksLikeHeap(callerVal))    score += 1;
                             if (globalRefVal == 0 || looksLikeHeap(globalRefVal)) score += 1;
+                            // Log every passing candidate so we can see what's being considered.
+                            logOnce("staticCand:" + cRTI + ":" + cRTV + ":" + cVTS + ":" + he + ":" + unit + ":" + deref,
+                                "  candidate: RTI@+0x" + cRTI.ToString("X") + " RTV@+0x" + cRTV.ToString("X")
+                                + " VTS@+0x" + cVTS.ToString("X") + " HE=+0x" + he.ToString("X")
+                                + " unit=" + unit + " deref=" + deref
+                                + " => mSbase=0x" + mSbase.ToString("X")
+                                + " _stats=0x" + statsVal.ToString("X")
+                                + " helperBonus=" + helperBonus
+                                + " caller=0x" + callerVal.ToString("X")
+                                + " global=0x" + globalRefVal.ToString("X")
+                                + " score=" + score);
                             if (score > bestStaticScore) {
                                 bestStaticScore = score;
                                 bestRTI = cRTI; bestRTV = cRTV; bestVTS = cVTS; bestHE = he; bestUnit = unit; bestDeref = deref;
@@ -1431,6 +1443,37 @@ update
             + " finStory=" + current.finStory
             + " lastFloor=" + current.lastFloor
             + " infMode=" + current.infMode);
+        // Dump 0x40 bytes around &Master._stats and &GameMaster.helper so we
+        // can see if our addresses point to real static-data regions or zeros.
+        // Only first time after init complete.
+        if (!((IDictionary<string,object>)vars).ContainsKey("StaticAreaDumped")) {
+            vars.StaticAreaDumped = true;
+            try {
+                long aStatsAddr  = (long)vars.Addr_Master_stats;
+                long aHelperAddr = (long)vars.Addr_GameMaster_helper;
+                ((Action<object>)vars.Log)("Static area inspection:");
+                ((Action<object>)vars.Log)("  &Master._stats     = 0x" + aStatsAddr.ToString("X"));
+                ((Action<object>)vars.Log)("  &GameMaster.helper = 0x" + aHelperAddr.ToString("X"));
+                long mStatsBase = aStatsAddr - 0x10;  // _stats.offset is 0x10
+                long gmHelperBase = aHelperAddr;       // helper.offset is 0
+                // Dump 0x40 bytes starting from each computed sbase.
+                byte[] mBuf = null, gmBuf = null;
+                try { mBuf  = game.ReadBytes((IntPtr)mStatsBase, 0x40); } catch {}
+                try { gmBuf = game.ReadBytes((IntPtr)gmHelperBase, 0x40); } catch {}
+                if (mBuf != null) {
+                    for (int i = 0; i + 4 <= mBuf.Length; i += 4) {
+                        uint v = BitConverter.ToUInt32(mBuf, i);
+                        ((Action<object>)vars.Log)("    Master.sbase+0x" + i.ToString("X2") + " = 0x" + v.ToString("X8"));
+                    }
+                }
+                if (gmBuf != null) {
+                    for (int i = 0; i + 4 <= gmBuf.Length; i += 4) {
+                        uint v = BitConverter.ToUInt32(gmBuf, i);
+                        ((Action<object>)vars.Log)("    GameMaster.sbase+0x" + i.ToString("X2") + " = 0x" + v.ToString("X8"));
+                    }
+                }
+            } catch {}
+        }
     }
 }
 
