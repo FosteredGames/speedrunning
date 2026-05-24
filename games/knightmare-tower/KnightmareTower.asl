@@ -3,7 +3,10 @@
 //
 // Splits:
 //   1. All missions complete + key obtained  (Master.stats.finishedMissions -> true)
-//   2. Final boss killed                     (Master.stats.finishedStory   -> true)
+//   2. Final boss killed (last hit)          (Global.finishedBoss          -> true)
+//      Fires inside BossBase.die() so RealTime matches the community rule
+//      "RealTime to last hit". A single split captures both timing methods
+//      simultaneously, so IGT is also correct at the kill moment.
 //
 // Timing:    IGT accumulates GameHelper.realTime across attempts.
 // Auto-reset: when a New Game wipes the save.
@@ -44,12 +47,13 @@ startup
 {
     // Bump on every edit so you can confirm in DebugView that LiveSplit
     // reloaded the new file. Format: "YYYY-MM-DDTHH:MMZ (git-shorthash)".
-    vars.ScriptVersion = "2026-05-23T11:35Z (f5409ab+hardcoded-fast-path-fix-dict)";
+    vars.ScriptVersion = "2026-05-23T13:30Z (dffad31+split-on-last-hit)";
     print("[KT] script loaded -- version " + vars.ScriptVersion);
 
     settings.Add("split_missions", true,  "Split when all missions complete (key obtained)");
     settings.Add("split_boss",     true,  "Split on final boss defeat");
     settings.Add("reset_new_game", true,  "Auto-reset when a New Game is started");
+    settings.Add("start_new_game", true,  "Auto-start timer when a New Game is accepted (cutscene plays for ~30.5s — set .lss Offset to -00:00:30.5 so timer reaches 0 when cutscene ends)");
     settings.Add("debug",          true,  "Print Mono walker debug info");
 
     // settings in `startup` is a builder (no indexing). The Log lambda will
@@ -431,12 +435,13 @@ init
 {
     // `settings` here is the reader -- safe to index. Pull the debug flag
     // onto vars so the Log lambda (defined in startup) can read it.
-    vars.LogEnabled     = settings["debug"];
-    vars.Initialized    = false;
-    vars.JustInitialized = false;
-    vars.LastDiagLogSec = 0.0;
-    vars.InitTries      = 0;
-    refreshRate         = 60;
+    vars.LogEnabled         = settings["debug"];
+    vars.Initialized        = false;
+    vars.JustInitialized    = false;
+    vars.PendingNewGameStart = false;
+    vars.LastDiagLogSec     = 0.0;
+    vars.InitTries          = 0;
+    refreshRate             = 60;
 
     print("[KT] init -- version " + vars.ScriptVersion + " pid=" + game.Id);
 
@@ -558,6 +563,7 @@ update
             + " gmStats=0x" + gmStats.ToString("X") + (gmStats == 0 ? " (OK)" : " (NONZERO!)")
             + " finMissions=" + current.finMissions
             + " finStory=" + current.finStory
+            + " finBoss=" + current.finBoss
             + " lastFloor=" + current.lastFloor
             + " infMode=" + current.infMode);
         // Dump 0x40 bytes around &Master._stats and &GameMaster.helper so we
@@ -598,10 +604,49 @@ start
 {
     if (current.infMode) return false;
 
-    // Kickstart: if init completed mid-gameplay (current.inMainPlay is already
-    // true but we never observed the false->true transition), fire start
-    // immediately on the first post-init tick. JustInitialized is set by the
-    // init code path and cleared here.
+    // === Path A: New Game accepted ===
+    // Speedrun rule: "Timing starts upon the opening cutscene completing after
+    // starting a new game." The cutscene runs for ~30.5s, so the .lss should
+    // have Offset = -00:00:30.5 -- the timer counts up from -30.5 to 0 over
+    // the cutscene and reads 0 exactly when gameplay begins.
+    //
+    // Two ways to enter this path:
+    //  1. PendingNewGameStart: reset block ran on this transition and set
+    //     the flag; we fire on the next tick. Handles "timer was running
+    //     when user clicked New Game" (e.g., back-to-back attempts).
+    //  2. Direct wipe transition: timer wasn't running when wipe happened;
+    //     start fires the same tick. Handles "fresh LiveSplit session,
+    //     user clicks New Game".
+    if (settings["start_new_game"]) {
+        if ((bool)vars.PendingNewGameStart) {
+            vars.PendingNewGameStart = false;
+            vars.igtAccumTicks = 0L;
+            vars.lastRealTime  = 0;
+            ((Action<object>)vars.Log)("Timer start (New Game accepted, post-reset).");
+            return true;
+        }
+        // PRIMARY signal: StatsCentral.reset() creates a brand new GameStats
+        // instance and reassigns Master.stats = component (StatsCentral.cs:96).
+        // So statsPtr changing from one heap value to another = New Game.
+        // This is reliable even on the 2nd+ New Game in a session, where
+        // field-wipe detection would miss (fields already at defaults).
+        bool statsReassigned = current.statsPtr != old.statsPtr
+            && current.statsPtr != 0
+            && old.statsPtr != 0;
+        if (statsReassigned) {
+            vars.igtAccumTicks = 0L;
+            vars.lastRealTime  = 0;
+            ((Action<object>)vars.Log)("Timer start (New Game accepted -- stats reassigned 0x"
+                + old.statsPtr.ToString("X") + " -> 0x" + current.statsPtr.ToString("X") + ").");
+            return true;
+        }
+    }
+
+    // === Path B: Kickstart (init completed mid-gameplay) ===
+    // For when LiveSplit attaches while the user is already in the tower.
+    // NOTE: this fires regardless of how we got there, so for a strict any%
+    // run starting from New Game, the .lss offset is technically wrong here
+    // (the cutscene is long past). Keep it for convenience / debugging.
     bool kickstart = (bool)vars.JustInitialized
         && current.inMainPlay == true
         && current.helperPtr != 0;
@@ -612,10 +657,11 @@ start
         ((Action<object>)vars.Log)("Timer start (kickstart: init completed mid-gameplay; realTime=" + current.realTime + ").");
         return true;
     }
-    // Once we've observed any normal tick post-init, clear JustInitialized
-    // so we don't kickstart later when the user is genuinely on a menu.
     if ((bool)vars.JustInitialized) vars.JustInitialized = false;
 
+    // === Path C: inMainPlay transition (knight launched from castle) ===
+    // Useful if user starts the run from an existing save (not a New Game).
+    // Same caveat as Path B re: the .lss offset.
     if (old.inMainPlay == false && current.inMainPlay == true && current.helperPtr != 0)
     {
         vars.igtAccumTicks = 0L;
@@ -641,8 +687,8 @@ split
         ((Action<object>)vars.Log)("Split 1: missions finished / key.");
         return true;
     }
-    if (settings["split_boss"] && old.finStory == false && current.finStory == true) {
-        ((Action<object>)vars.Log)("Split 2: boss defeated.");
+    if (settings["split_boss"] && old.finBoss == false && current.finBoss == true) {
+        ((Action<object>)vars.Log)("Split 2: boss defeated (last hit -- Global.finishedBoss).");
         return true;
     }
     return false;
@@ -651,12 +697,21 @@ split
 reset
 {
     if (!settings["reset_new_game"]) return false;
-    bool wipedMissions = (old.finMissions  && !current.finMissions);
-    bool wipedStory    = (old.finStory     && !current.finStory);
-    bool wipedFloor    = (old.lastFloor > 0 && current.lastFloor == 0);
-    bool wipedDeaths   = (old.numDied   > 0 && current.numDied   == 0);
-    if (wipedMissions || wipedStory || wipedFloor || wipedDeaths) {
-        ((Action<object>)vars.Log)("New Game detected -> reset.");
+    // PRIMARY signal: StatsCentral.reset() builds a new GameStats instance and
+    // reassigns Master.stats = component. The static-field pointer changes from
+    // one heap value to another -- reliable on every New Game, including the
+    // 2nd+ in a session (field-wipe checks miss those because the fields are
+    // already at default values from the prior wipe).
+    bool statsReassigned = current.statsPtr != old.statsPtr
+        && current.statsPtr != 0
+        && old.statsPtr != 0;
+    if (statsReassigned) {
+        // Hand off to the start block: it'll fire on the next tick (timer is
+        // NotRunning after this reset).
+        vars.PendingNewGameStart = true;
+        ((Action<object>)vars.Log)("New Game detected -> reset (stats 0x"
+            + old.statsPtr.ToString("X") + " -> 0x" + current.statsPtr.ToString("X")
+            + "; start will refire next tick if start_new_game is on).");
         return true;
     }
     return false;

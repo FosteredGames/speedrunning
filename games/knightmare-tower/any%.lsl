@@ -1,9 +1,9 @@
 ﻿<?xml version="1.0" encoding="UTF-8"?>
 <Layout version="1.6.1">
   <Mode>Vertical</Mode>
-  <X>3176</X>
+  <X>3135</X>
   <Y>2364</Y>
-  <VerticalWidth>286</VerticalWidth>
+  <VerticalWidth>327</VerticalWidth>
   <VerticalHeight>176</VerticalHeight>
   <HorizontalWidth>-1</HorizontalWidth>
   <HorizontalHeight>-1</HorizontalHeight>
@@ -113,15 +113,22 @@
             <Version>1.5</Version>
             <Name>Time</Name>
             <Type>SplitTime</Type>
-            <Comparison>Current Comparison</Comparison>
+            <Comparison>Average Segments</Comparison>
             <TimingMethod>Current Timing Method</TimingMethod>
           </Settings>
           <Settings>
             <Version>1.5</Version>
             <Name>Best Segment</Name>
-            <Type>SegmentTime</Type>
+            <Type>SegmentDeltaorSegmentTime</Type>
             <Comparison>Best Segments</Comparison>
             <TimingMethod>Current Timing Method</TimingMethod>
+          </Settings>
+          <Settings>
+            <Version>1.5</Version>
+            <Name>IGT</Name>
+            <Type>SplitTime</Type>
+            <Comparison>Current Comparison</Comparison>
+            <TimingMethod>Game Time</TimingMethod>
           </Settings>
         </Columns>
       </Settings>
@@ -173,6 +180,7 @@
           <Setting id="split_missions" type="bool">True</Setting>
           <Setting id="split_boss" type="bool">True</Setting>
           <Setting id="reset_new_game" type="bool">True</Setting>
+          <Setting id="start_new_game" type="bool">True</Setting>
           <Setting id="debug" type="bool">True</Setting>
         </CustomSettings>
       </Settings>
