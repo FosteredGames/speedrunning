@@ -47,7 +47,7 @@ startup
 {
     // Bump on every edit so you can confirm in DebugView that LiveSplit
     // reloaded the new file. Format: "YYYY-MM-DDTHH:MMZ (git-shorthash)".
-    vars.ScriptVersion = "2026-05-23T13:30Z (dffad31+split-on-last-hit)";
+    vars.ScriptVersion = "2026-05-24T00:00Z (01c74cb+ended-state-reset)";
     print("[KT] script loaded -- version " + vars.ScriptVersion);
 
     settings.Add("split_missions", true,  "Split when all missions complete (key obtained)");
@@ -536,6 +536,40 @@ update
         current.inBoss     = false;
     }
 
+    // === Post-completion New Game escape hatch ===
+    // After Split 2 fires the timer enters TimerPhase.Ended, in which state
+    // LiveSplit's ScriptableAutoSplit (ASLScript.cs:324-368) calls neither
+    // `reset` nor `start` -- both are gated to Running/Paused and NotRunning
+    // respectively. So if the user clicks New Game from the post-completion
+    // main menu, our reset/start blocks never see the statsPtr transition
+    // and the timer stays stuck on the finished run.
+    //
+    // Workaround: detect the transition here (update IS called every tick
+    // regardless of phase) and programmatically Reset() via a user-script
+    // TimerModel. Reset is synchronous, so by the time control reaches the
+    // NotRunning branch later in the same DoUpdate cycle, our start block
+    // can fire and the new run kicks off without the user touching anything.
+    // Use ContainsKey rather than `vars.TimerModel == null` -- accessing an
+    // undefined ExpandoObject property via dynamic dispatch throws
+    // RuntimeBinderException, which would kill the rest of update silently.
+    if (!((IDictionary<string,object>)vars).ContainsKey("TimerModel")) {
+        vars.TimerModel = new LiveSplit.Model.TimerModel { CurrentState = timer };
+    }
+    if (settings["reset_new_game"]
+        && timer.CurrentPhase == LiveSplit.Model.TimerPhase.Ended
+        && current.statsPtr != old.statsPtr
+        && current.statsPtr != 0
+        && old.statsPtr != 0)
+    {
+        vars.PendingNewGameStart = true;
+        ((Action<object>)vars.Log)("Post-completion New Game (timer in Ended state) -- programmatic Reset (stats 0x"
+            + old.statsPtr.ToString("X") + " -> 0x" + current.statsPtr.ToString("X") + ").");
+        // Reset(false) -- skip the "save splits?" prompt. The user can save
+        // their PB through LiveSplit's normal Save mechanism if they want;
+        // popping a modal dialog mid-auto-flow would defeat the purpose.
+        vars.TimerModel.Reset(false);
+    }
+
     // IGT accumulator: bank the per-run tick count when the run ends.
     bool runJustEnded = ((long)vars.lastHelperPtr != 0) && (current.helperPtr == 0);
     if (runJustEnded) {
@@ -555,7 +589,8 @@ update
         // Cross-check: GameMaster.gameStats is never assigned in source, so should be 0.
         long gmStats = 0;
         try { gmStats = (long)(uint)game.ReadValue<int>((IntPtr)(long)vars.Addr_GameMaster_gameStats); } catch {}
-        ((Action<object>)vars.Log)("state: helper=0x" + current.helperPtr.ToString("X")
+        ((Action<object>)vars.Log)("state: phase=" + timer.CurrentPhase
+            + " helper=0x" + current.helperPtr.ToString("X")
             + " realTime=" + current.realTime
             + " inMainPlay=" + current.inMainPlay
             + " inBoss=" + current.inBoss
