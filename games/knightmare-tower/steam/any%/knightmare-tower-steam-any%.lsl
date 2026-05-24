@@ -172,7 +172,7 @@
       <Path>LiveSplit.ScriptableAutoSplit.dll</Path>
       <Settings>
         <Version>1.5</Version>
-        <ScriptPath>auto-split.asl</ScriptPath>
+        <ScriptPath>scripts/knightmare-tower-steam-any%.asl</ScriptPath>
         <Start>True</Start>
         <Reset>True</Reset>
         <Split>True</Split>
