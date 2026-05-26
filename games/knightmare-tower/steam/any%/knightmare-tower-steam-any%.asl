@@ -47,7 +47,7 @@ startup
 {
     // Bump on every edit so you can confirm in DebugView that LiveSplit
     // reloaded the new file. Format: "YYYY-MM-DDTHH:MMZ (git-shorthash)".
-    vars.ScriptVersion = "2026-05-24T00:00Z (01c74cb+ended-state-reset)";
+    vars.ScriptVersion = "2026-05-26T00:00Z (a557526+fresh-install-start)";
     print("[KT] script loaded -- version " + vars.ScriptVersion);
 
     settings.Add("split_missions", true,  "Split when all missions complete (key obtained)");
@@ -350,7 +350,7 @@ startup
         string[] needGM     = new string[] { "helper", "gameStats" };
         string[] needGlobal = new string[] { "finishedBoss", "infiniteMode" };
         string[] needLevel  = new string[] { "numDoors" };
-        string[] needStats  = new string[] { "finishedMissions", "finishedStory", "lastFloor", "numdied" };
+        string[] needStats  = new string[] { "finishedMissions", "finishedStory", "lastFloor", "numdied", "alreadyPlayed" };
         string[] needHelper = new string[] { "realTime", "isInMainGameplay", "inBoss" };
         Func<string, Dictionary<string,int>, string[], string> checkFields = (lbl, dict, names) => {
             foreach (var n in names) if (!dict.ContainsKey(n)) return lbl + "." + n;
@@ -412,6 +412,7 @@ startup
         vd["Foff_finishedStory"]        = fStats["finishedStory"];
         vd["Foff_lastFloor"]            = fStats["lastFloor"];
         vd["Foff_numdied"]              = fStats["numdied"];
+        vd["Foff_alreadyPlayed"]        = fStats["alreadyPlayed"];
         vd["Foff_realTime"]             = fHelper["realTime"];
         vd["Foff_isInMainGameplay"]     = fHelper["isInMainGameplay"];
         vd["Foff_inBoss"]               = fHelper["inBoss"];
@@ -441,6 +442,12 @@ init
     vars.PendingNewGameStart = false;
     vars.LastDiagLogSec     = 0.0;
     vars.InitTries          = 0;
+    // Cutscene-duration instrumentation: when start fires we stash the wall-
+    // clock ms and the path label; when realTime ticks for the first time
+    // afterwards we log the elapsed time. Lets us compare path B (statsPtr)
+    // vs B2 (alreadyPlayed) to confirm the .lss -30.5s offset works for both.
+    vars.LastStartTickMs    = 0L;
+    vars.LastStartReason    = "";
     refreshRate             = 60;
 
     print("[KT] init -- version " + vars.ScriptVersion + " pid=" + game.Id);
@@ -515,15 +522,17 @@ update
     current.infMode   = game.ReadValue<bool>((IntPtr)(long)vars.Addr_infiniteMode);
 
     if (current.statsPtr != 0) {
-        current.finMissions = game.ReadValue<bool>((IntPtr)(current.statsPtr + (int)vars.Foff_finishedMissions));
-        current.finStory    = game.ReadValue<bool>((IntPtr)(current.statsPtr + (int)vars.Foff_finishedStory));
-        current.lastFloor   = game.ReadValue<int> ((IntPtr)(current.statsPtr + (int)vars.Foff_lastFloor));
-        current.numDied     = game.ReadValue<int> ((IntPtr)(current.statsPtr + (int)vars.Foff_numdied));
+        current.finMissions   = game.ReadValue<bool>((IntPtr)(current.statsPtr + (int)vars.Foff_finishedMissions));
+        current.finStory      = game.ReadValue<bool>((IntPtr)(current.statsPtr + (int)vars.Foff_finishedStory));
+        current.lastFloor     = game.ReadValue<int> ((IntPtr)(current.statsPtr + (int)vars.Foff_lastFloor));
+        current.numDied       = game.ReadValue<int> ((IntPtr)(current.statsPtr + (int)vars.Foff_numdied));
+        current.alreadyPlayed = game.ReadValue<bool>((IntPtr)(current.statsPtr + (int)vars.Foff_alreadyPlayed));
     } else {
-        current.finMissions = false;
-        current.finStory    = false;
-        current.lastFloor   = 0;
-        current.numDied     = 0;
+        current.finMissions   = false;
+        current.finStory      = false;
+        current.lastFloor     = 0;
+        current.numDied       = 0;
+        current.alreadyPlayed = false;
     }
 
     if (current.helperPtr != 0) {
@@ -534,6 +543,22 @@ update
         current.realTime   = 0;
         current.inMainPlay = false;
         current.inBoss     = false;
+    }
+
+    // Cutscene-to-gameplay duration log. After a start fires, the cutscene
+    // plays for ~30.5s before realTime starts incrementing. Compare across
+    // start paths (B = statsPtr, B2 = alreadyPlayed) to verify both align
+    // with the .lss -00:00:30.5 offset.
+    if ((long)vars.LastStartTickMs != 0L
+        && (int)vars.lastRealTime == 0
+        && current.realTime > 0)
+    {
+        long elapsedMs = (long)Environment.TickCount - (long)vars.LastStartTickMs;
+        ((Action<object>)vars.Log)("Cutscene-to-gameplay: "
+            + (elapsedMs / 1000.0).ToString("F3") + "s"
+            + " (after start via " + (string)vars.LastStartReason + ")");
+        vars.LastStartTickMs = 0L;
+        vars.LastStartReason = "";
     }
 
     // === Post-completion New Game escape hatch ===
@@ -599,6 +624,7 @@ update
             + " finMissions=" + current.finMissions
             + " finStory=" + current.finStory
             + " finBoss=" + current.finBoss
+            + " alreadyPlayed=" + current.alreadyPlayed
             + " lastFloor=" + current.lastFloor
             + " infMode=" + current.infMode);
         // Dump 0x40 bytes around &Master._stats and &GameMaster.helper so we
@@ -639,71 +665,83 @@ start
 {
     if (current.infMode) return false;
 
-    // === Path A: New Game accepted ===
+    // === New Game accepted (paths A / B / B2) ===
     // Speedrun rule: "Timing starts upon the opening cutscene completing after
-    // starting a new game." The cutscene runs for ~30.5s, so the .lss should
-    // have Offset = -00:00:30.5 -- the timer counts up from -30.5 to 0 over
-    // the cutscene and reads 0 exactly when gameplay begins.
-    //
-    // Two ways to enter this path:
-    //  1. PendingNewGameStart: reset block ran on this transition and set
-    //     the flag; we fire on the next tick. Handles "timer was running
-    //     when user clicked New Game" (e.g., back-to-back attempts).
-    //  2. Direct wipe transition: timer wasn't running when wipe happened;
-    //     start fires the same tick. Handles "fresh LiveSplit session,
-    //     user clicks New Game".
+    // starting a new game." The cutscene runs for ~30.5s, so the .lss has
+    // Offset = -00:00:30.5 -- the timer counts up from -30.5 to 0 over the
+    // cutscene and reads 0 exactly when gameplay begins.
     if (settings["start_new_game"]) {
+        // --- Path A: handoff from reset block (timer was Running/Paused) ---
+        // The reset block detected the New Game transition on a prior tick
+        // and set this flag. We fire on the next tick, after LiveSplit has
+        // transitioned the timer from Running -> NotRunning via reset().
         if ((bool)vars.PendingNewGameStart) {
             vars.PendingNewGameStart = false;
-            vars.igtAccumTicks = 0L;
-            vars.lastRealTime  = 0;
+            vars.igtAccumTicks   = 0L;
+            vars.lastRealTime    = 0;
+            vars.LastStartTickMs = (long)Environment.TickCount;
+            vars.LastStartReason = "A-pending-from-reset";
             ((Action<object>)vars.Log)("Timer start (New Game accepted, post-reset).");
             return true;
         }
-        // PRIMARY signal: StatsCentral.reset() creates a brand new GameStats
-        // instance and reassigns Master.stats = component (StatsCentral.cs:96).
-        // So statsPtr changing from one heap value to another = New Game.
-        // This is reliable even on the 2nd+ New Game in a session, where
-        // field-wipe detection would miss (fields already at defaults).
+        // --- Path B: statsPtr reassigned (in-game New Game) ---
+        // StatsCentral.reset() creates a brand new GameStats instance and
+        // reassigns Master.stats = component (StatsCentral.cs:96). statsPtr
+        // changing from one nonzero heap value to another = New Game from
+        // the main menu. Fires when timer was NotRunning when reset happened.
         bool statsReassigned = current.statsPtr != old.statsPtr
             && current.statsPtr != 0
             && old.statsPtr != 0;
         if (statsReassigned) {
-            vars.igtAccumTicks = 0L;
-            vars.lastRealTime  = 0;
+            vars.igtAccumTicks   = 0L;
+            vars.lastRealTime    = 0;
+            vars.LastStartTickMs = (long)Environment.TickCount;
+            vars.LastStartReason = "B-stats-reassign";
             ((Action<object>)vars.Log)("Timer start (New Game accepted -- stats reassigned 0x"
                 + old.statsPtr.ToString("X") + " -> 0x" + current.statsPtr.ToString("X") + ").");
             return true;
         }
+        // --- Path B2: alreadyPlayed false -> true (fresh-install auto-intro) ---
+        // On a fresh save FPI.showMainMenu2() routes alreadyPlayed=false
+        // straight into showIntro() without showing the main menu, so the
+        // user never clicks New Game and path B never fires. showIntro()
+        // sets Master.stats.alreadyPlayed = true as its FIRST line
+        // (FPI.cs:829) and then plays the cutscene -- so this transition
+        // marks the cutscene start in both the fresh-install case AND the
+        // in-game New Game case (where path B has already fired this tick,
+        // so this is a no-op because the start phase is no longer NotRunning).
+        if (current.statsPtr != 0
+            && old.alreadyPlayed == false
+            && current.alreadyPlayed == true)
+        {
+            vars.igtAccumTicks   = 0L;
+            vars.lastRealTime    = 0;
+            vars.LastStartTickMs = (long)Environment.TickCount;
+            vars.LastStartReason = "B2-alreadyPlayed-flip";
+            ((Action<object>)vars.Log)("Timer start (alreadyPlayed false->true -- fresh-install auto-intro).");
+            return true;
+        }
     }
 
-    // === Path B: Kickstart (init completed mid-gameplay) ===
+    // === Path C: Kickstart (init completed mid-gameplay) ===
     // For when LiveSplit attaches while the user is already in the tower.
-    // NOTE: this fires regardless of how we got there, so for a strict any%
-    // run starting from New Game, the .lss offset is technically wrong here
-    // (the cutscene is long past). Keep it for convenience / debugging.
+    // The .lss -30.5s offset is wrong here (cutscene is long past) so this
+    // path is primarily for development convenience; runs started this way
+    // shouldn't be submitted.
     bool kickstart = (bool)vars.JustInitialized
         && current.inMainPlay == true
         && current.helperPtr != 0;
     if (kickstart) {
         vars.JustInitialized = false;
-        vars.igtAccumTicks = 0L;
-        vars.lastRealTime  = 0;
+        vars.igtAccumTicks   = 0L;
+        vars.lastRealTime    = 0;
+        vars.LastStartTickMs = 0L;
+        vars.LastStartReason = "";
         ((Action<object>)vars.Log)("Timer start (kickstart: init completed mid-gameplay; realTime=" + current.realTime + ").");
         return true;
     }
     if ((bool)vars.JustInitialized) vars.JustInitialized = false;
 
-    // === Path C: inMainPlay transition (knight launched from castle) ===
-    // Useful if user starts the run from an existing save (not a New Game).
-    // Same caveat as Path B re: the .lss offset.
-    if (old.inMainPlay == false && current.inMainPlay == true && current.helperPtr != 0)
-    {
-        vars.igtAccumTicks = 0L;
-        vars.lastRealTime  = 0;
-        ((Action<object>)vars.Log)("Timer start (transition: inMainPlay false->true).");
-        return true;
-    }
     return false;
 }
 
