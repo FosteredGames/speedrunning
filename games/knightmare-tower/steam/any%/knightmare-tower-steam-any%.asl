@@ -8,6 +8,14 @@
 //      "RealTime to last hit". A single split captures both timing methods
 //      simultaneously, so IGT is also correct at the kill moment.
 //
+// Start:     GameMaster.canPause false -> true (cutscene + 1s black fade +
+//            1.8s camera tween all complete). Multiple detection paths
+//            (statsPtr change, alreadyPlayed flip, post-completion escape,
+//            mid-run reset) all ARM the same pending flag, ensuring exact
+//            parity in timing -- canPause fires identically regardless of
+//            which path armed it. The .lss carries Offset = +00:00:02.8 so
+//            the timer reads 2.8s at canPause-true, i.e. starts counting
+//            from the .mp4-end moment (including the post-movie transition).
 // Timing:    IGT accumulates GameHelper.realTime across attempts.
 // Auto-reset: when a New Game wipes the save.
 //
@@ -47,7 +55,7 @@ startup
 {
     // Bump on every edit so you can confirm in DebugView that LiveSplit
     // reloaded the new file. Format: "YYYY-MM-DDTHH:MMZ (git-shorthash)".
-    vars.ScriptVersion = "2026-05-26T00:00Z (a557526+fresh-install-start)";
+    vars.ScriptVersion = "2026-05-26T13:00Z (74118c6+init-arm-on-canPause-false)";
     print("[KT] script loaded -- version " + vars.ScriptVersion);
 
     settings.Add("split_missions", true,  "Split when all missions complete (key obtained)");
@@ -347,7 +355,7 @@ startup
         // Require all the fields we'll actually read. Missing means Mono hasn't
         // populated the fields array for that class yet -- retry next pass.
         string[] needMaster = new string[] { "_stats" };
-        string[] needGM     = new string[] { "helper", "gameStats" };
+        string[] needGM     = new string[] { "helper", "gameStats", "_canPause" };
         string[] needGlobal = new string[] { "finishedBoss", "infiniteMode" };
         string[] needLevel  = new string[] { "numDoors" };
         string[] needStats  = new string[] { "finishedMissions", "finishedStory", "lastFloor", "numdied", "alreadyPlayed" };
@@ -405,6 +413,7 @@ startup
         vd["Addr_Master_stats"]         = sbMaster + fMaster["_stats"];
         vd["Addr_GameMaster_helper"]    = sbGM     + fGM["helper"];
         vd["Addr_GameMaster_gameStats"] = sbGM     + fGM["gameStats"];
+        vd["Addr_GameMaster_canPause"]  = sbGM     + fGM["_canPause"];
         vd["Addr_numDoors"]             = sbLevel  + fLevel["numDoors"];
         vd["Addr_finishedBoss"]         = sbGlobal + fGlobal["finishedBoss"];
         vd["Addr_infiniteMode"]         = sbGlobal + fGlobal["infiniteMode"];
@@ -439,13 +448,21 @@ init
     vars.LogEnabled         = settings["debug"];
     vars.Initialized        = false;
     vars.JustInitialized    = false;
-    vars.PendingNewGameStart = false;
+    // PendingCutsceneEnd: armed by any New-Game detection (statsPtr change,
+    // alreadyPlayed flip, post-completion Ended-state escape, mid-run reset
+    // transition). Consumed when GameMaster.canPause goes false -> true --
+    // the cutscene + 1s black fade + 1.8s camera tween have all completed
+    // and control returns to the player. This is the unified start moment
+    // that produces exact parity across all New-Game paths. The .lss carries
+    // a +2.8s Offset so the timer reads 2.8s at canPause-true (i.e. starts
+    // counting from .mp4-end, including the post-movie transition).
+    vars.PendingCutsceneEnd = false;
     vars.LastDiagLogSec     = 0.0;
     vars.InitTries          = 0;
-    // Cutscene-duration instrumentation: when start fires we stash the wall-
-    // clock ms and the path label; when realTime ticks for the first time
-    // afterwards we log the elapsed time. Lets us compare path B (statsPtr)
-    // vs B2 (alreadyPlayed) to confirm the .lss -30.5s offset works for both.
+    // Validation instrumentation: when start fires we stash the wall-clock
+    // ms and the arming path; when realTime ticks for the first time we log
+    // the canPause-to-knight-launch elapsed time. Sanity check that the
+    // detection moment is consistent across paths.
     vars.LastStartTickMs    = 0L;
     vars.LastStartReason    = "";
     refreshRate             = 60;
@@ -520,6 +537,7 @@ update
     current.numDoors  = game.ReadValue<int> ((IntPtr)(long)vars.Addr_numDoors);
     current.finBoss   = game.ReadValue<bool>((IntPtr)(long)vars.Addr_finishedBoss);
     current.infMode   = game.ReadValue<bool>((IntPtr)(long)vars.Addr_infiniteMode);
+    current.canPause  = game.ReadValue<bool>((IntPtr)(long)vars.Addr_GameMaster_canPause);
 
     if (current.statsPtr != 0) {
         current.finMissions   = game.ReadValue<bool>((IntPtr)(current.statsPtr + (int)vars.Foff_finishedMissions));
@@ -545,10 +563,10 @@ update
         current.inBoss     = false;
     }
 
-    // Cutscene-to-gameplay duration log. After a start fires, the cutscene
-    // plays for ~30.5s before realTime starts incrementing. Compare across
-    // start paths (B = statsPtr, B2 = alreadyPlayed) to verify both align
-    // with the .lss -00:00:30.5 offset.
+    // canPause-to-knight-launch duration log. Now that start fires at
+    // canPause false -> true, this measures how long the player took to
+    // press launch after gaining control. Useful only as sanity-check
+    // (consistent across paths confirms canPause trigger fires identically).
     if ((long)vars.LastStartTickMs != 0L
         && (int)vars.lastRealTime == 0
         && current.realTime > 0)
@@ -586,7 +604,8 @@ update
         && current.statsPtr != 0
         && old.statsPtr != 0)
     {
-        vars.PendingNewGameStart = true;
+        vars.PendingCutsceneEnd = true;
+        vars.LastStartReason    = "ended-state-escape";
         ((Action<object>)vars.Log)("Post-completion New Game (timer in Ended state) -- programmatic Reset (stats 0x"
             + old.statsPtr.ToString("X") + " -> 0x" + current.statsPtr.ToString("X") + ").");
         // Reset(false) -- skip the "save splits?" prompt. The user can save
@@ -625,6 +644,7 @@ update
             + " finStory=" + current.finStory
             + " finBoss=" + current.finBoss
             + " alreadyPlayed=" + current.alreadyPlayed
+            + " canPause=" + current.canPause
             + " lastFloor=" + current.lastFloor
             + " infMode=" + current.infMode);
         // Dump 0x40 bytes around &Master._stats and &GameMaster.helper so we
@@ -665,69 +685,98 @@ start
 {
     if (current.infMode) return false;
 
-    // === New Game accepted (paths A / B / B2) ===
-    // Speedrun rule: "Timing starts upon the opening cutscene completing after
-    // starting a new game." The cutscene runs for ~30.5s, so the .lss has
-    // Offset = -00:00:30.5 -- the timer counts up from -30.5 to 0 over the
-    // cutscene and reads 0 exactly when gameplay begins.
+    // === New Game detection (ARMS pending flag; doesn't fire start) ===
+    // Each detection path observes a different early moment of the New Game
+    // flow, but ALL of them converge at the same later moment: GameMaster.
+    // canPause going false -> true, which is when the camera fade-in tween
+    // completes and control returns to the player (FPI.beginGameplayForReal
+    // at FPI.cs:525). We arm here, fire at canPause below -- this guarantees
+    // exact parity across paths.
     if (settings["start_new_game"]) {
-        // --- Path A: handoff from reset block (timer was Running/Paused) ---
-        // The reset block detected the New Game transition on a prior tick
-        // and set this flag. We fire on the next tick, after LiveSplit has
-        // transitioned the timer from Running -> NotRunning via reset().
-        if ((bool)vars.PendingNewGameStart) {
-            vars.PendingNewGameStart = false;
-            vars.igtAccumTicks   = 0L;
-            vars.lastRealTime    = 0;
-            vars.LastStartTickMs = (long)Environment.TickCount;
-            vars.LastStartReason = "A-pending-from-reset";
-            ((Action<object>)vars.Log)("Timer start (New Game accepted, post-reset).");
-            return true;
-        }
-        // --- Path B: statsPtr reassigned (in-game New Game) ---
-        // StatsCentral.reset() creates a brand new GameStats instance and
-        // reassigns Master.stats = component (StatsCentral.cs:96). statsPtr
-        // changing from one nonzero heap value to another = New Game from
-        // the main menu. Fires when timer was NotRunning when reset happened.
+        // Path B: statsPtr reassigned (in-game New Game). StatsCentral.reset()
+        // creates a new GameStats instance and reassigns Master.stats
+        // (StatsCentral.cs:96).
         bool statsReassigned = current.statsPtr != old.statsPtr
             && current.statsPtr != 0
             && old.statsPtr != 0;
-        if (statsReassigned) {
-            vars.igtAccumTicks   = 0L;
-            vars.lastRealTime    = 0;
-            vars.LastStartTickMs = (long)Environment.TickCount;
-            vars.LastStartReason = "B-stats-reassign";
-            ((Action<object>)vars.Log)("Timer start (New Game accepted -- stats reassigned 0x"
+        if (statsReassigned && !(bool)vars.PendingCutsceneEnd) {
+            vars.PendingCutsceneEnd = true;
+            vars.LastStartReason    = "B-stats-reassign";
+            ((Action<object>)vars.Log)("Arm cutscene-end start (B: stats reassigned 0x"
                 + old.statsPtr.ToString("X") + " -> 0x" + current.statsPtr.ToString("X") + ").");
-            return true;
         }
-        // --- Path B2: alreadyPlayed false -> true (fresh-install auto-intro) ---
+        // Path B2: alreadyPlayed false -> true (fresh-install auto-intro).
         // On a fresh save FPI.showMainMenu2() routes alreadyPlayed=false
         // straight into showIntro() without showing the main menu, so the
-        // user never clicks New Game and path B never fires. showIntro()
-        // sets Master.stats.alreadyPlayed = true as its FIRST line
-        // (FPI.cs:829) and then plays the cutscene -- so this transition
-        // marks the cutscene start in both the fresh-install case AND the
-        // in-game New Game case (where path B has already fired this tick,
-        // so this is a no-op because the start phase is no longer NotRunning).
+        // user never clicks New Game and path B never fires. showIntro() sets
+        // alreadyPlayed = true as its FIRST line (FPI.cs:829) before playing
+        // the movie.
         if (current.statsPtr != 0
             && old.alreadyPlayed == false
-            && current.alreadyPlayed == true)
+            && current.alreadyPlayed == true
+            && !(bool)vars.PendingCutsceneEnd)
         {
-            vars.igtAccumTicks   = 0L;
-            vars.lastRealTime    = 0;
-            vars.LastStartTickMs = (long)Environment.TickCount;
-            vars.LastStartReason = "B2-alreadyPlayed-flip";
-            ((Action<object>)vars.Log)("Timer start (alreadyPlayed false->true -- fresh-install auto-intro).");
-            return true;
+            vars.PendingCutsceneEnd = true;
+            vars.LastStartReason    = "B2-alreadyPlayed-flip";
+            ((Action<object>)vars.Log)("Arm cutscene-end start (B2: alreadyPlayed false -> true).");
         }
     }
 
-    // === Path C: Kickstart (init completed mid-gameplay) ===
+    // === FIRE: canPause false -> true (cutscene + camera tween complete) ===
+    // GameMaster.canPause is set true at the end of the 1.8s camera-fade-in
+    // tween (FPI.beginGameplayForReal at FPI.cs:525), which is exactly 2.8s
+    // after the .mp4 last frame plays (1s WaitToDo black-fade + 1.8s HOTween).
+    // The .lss has Offset = +00:00:02.8 so the timer reads 2.8s at this
+    // moment -- i.e. it begins counting from the .mp4-end moment, including
+    // the post-movie black-fade and camera-tween in the displayed run time.
+    if ((bool)vars.PendingCutsceneEnd
+        && old.canPause == false
+        && current.canPause == true)
+    {
+        vars.PendingCutsceneEnd = false;
+        vars.igtAccumTicks      = 0L;
+        vars.lastRealTime       = 0;
+        vars.LastStartTickMs    = (long)Environment.TickCount;
+        ((Action<object>)vars.Log)("Timer start (canPause false->true -- cutscene+tween complete; armed by "
+            + (string)vars.LastStartReason + ").");
+        return true;
+    }
+
+    // === Init-time arming: attached while canPause=false ===
+    // Init can complete after showIntro has already fired (e.g. game restart
+    // mid-cutscene -- save persists alreadyPlayed=false on disk, game auto-
+    // routes to showIntro, alreadyPlayed flips to true BEFORE our init
+    // finishes Mono walking). We don't observe the alreadyPlayed transition
+    // in that case. Same blind spot applies to anyone attaching LiveSplit
+    // after the game is already running.
+    //
+    // Mitigation: if canPause is false at init time, arm the pending flag
+    // -- the next canPause false->true will fire start. Safe in both
+    // ambiguous interpretations of "canPause=false at init":
+    //   - User in the cutscene: fires at the correct moment when control
+    //     returns (cutscene + tween complete).
+    //   - User at the main menu: stays armed until they click New Game and
+    //     proceed through the cutscene; canPause flip at the end fires
+    //     start as intended.
+    // If canPause is already true at init (player attached mid-gameplay or
+    // at the launcher post-cutscene), the kickstart path below handles it.
+    if ((bool)vars.JustInitialized
+        && current.helperPtr != 0
+        && current.canPause == false
+        && !(bool)vars.PendingCutsceneEnd)
+    {
+        vars.JustInitialized    = false;
+        vars.PendingCutsceneEnd = true;
+        vars.LastStartReason    = "init-canPause-false";
+        ((Action<object>)vars.Log)("Arm cutscene-end start (init: canPause=false at attach; awaiting next false->true).");
+        return false;
+    }
+
+    // === Kickstart: init completed with canPause=true (mid-gameplay) ===
     // For when LiveSplit attaches while the user is already in the tower.
-    // The .lss -30.5s offset is wrong here (cutscene is long past) so this
-    // path is primarily for development convenience; runs started this way
-    // shouldn't be submitted.
+    // The .lss +2.8s offset is wrong here (no cutscene/tween to compensate
+    // for), so runs started this way shouldn't be submitted -- it's
+    // primarily a development convenience.
     bool kickstart = (bool)vars.JustInitialized
         && current.inMainPlay == true
         && current.helperPtr != 0;
@@ -779,12 +828,13 @@ reset
         && current.statsPtr != 0
         && old.statsPtr != 0;
     if (statsReassigned) {
-        // Hand off to the start block: it'll fire on the next tick (timer is
-        // NotRunning after this reset).
-        vars.PendingNewGameStart = true;
+        // Hand off to the start block: arm the pending flag so start fires
+        // when canPause goes false -> true (cutscene + camera tween complete).
+        vars.PendingCutsceneEnd = true;
+        vars.LastStartReason    = "reset-handoff";
         ((Action<object>)vars.Log)("New Game detected -> reset (stats 0x"
             + old.statsPtr.ToString("X") + " -> 0x" + current.statsPtr.ToString("X")
-            + "; start will refire next tick if start_new_game is on).");
+            + "; start will refire when canPause false->true if start_new_game is on).");
         return true;
     }
     return false;

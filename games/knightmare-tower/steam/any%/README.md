@@ -46,7 +46,7 @@ In the layout's *Scriptable Auto Splitter* component (right-click LiveSplit
 | `split_missions` | on | Splits when all 40 missions are complete (the key UI appears). Works for both normal completion and pay-to-skip. |
 | `split_boss` | on | Splits at the last hit on the final boss (fires inside `BossBase.die()`, before the outro cinematic plays). |
 | `reset_new_game` | on | Auto-resets when you accept a New Game from the title screen. |
-| `start_new_game` | on | Auto-starts the timer when you accept New Game. Pairs with the .lss `Offset = -00:00:30.5` so the timer counts up from -30.5 to 0 during the opening cutscene and reads 0 exactly when gameplay starts. |
+| `start_new_game` | on | Auto-starts the timer at the end of the opening cutscene (the moment control returns to the player, after the 1.8s camera fade-in). The .lss carries a `+00:00:02.8` offset so the timer reads 2.8s at that moment — i.e. timing begins at the .mp4 last frame, including the post-movie black-fade + camera-tween in the run, per the SRC rule. Note: the timer is NOT visible during the cutscene; it appears at 2.8s when control returns. |
 | `debug` | on | Verbose internal logging. You can leave this off — it's only useful when reporting a bug. |
 
 ## Timing
