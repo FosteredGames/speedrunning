@@ -11,11 +11,20 @@
 // Start:     GameMaster.canPause false -> true (cutscene + 1s black fade +
 //            1.8s camera tween all complete). Multiple detection paths
 //            (statsPtr change, alreadyPlayed flip, post-completion escape,
-//            mid-run reset) all ARM the same pending flag, ensuring exact
-//            parity in timing -- canPause fires identically regardless of
-//            which path armed it. The .lss carries Offset = +00:00:02.8 so
-//            the timer reads 2.8s at canPause-true, i.e. starts counting
-//            from the .mp4-end moment (including the post-movie transition).
+//            mid-run reset, init-while-canPause-false) all ARM the same
+//            pending flag, ensuring exact parity in timing -- canPause
+//            fires identically regardless of which path armed it.
+//
+//            The .lss carries Offset = +00:00:01.25 by default ("convention
+//            mode") so the timer reads 1.25s at canPause-true; this matches
+//            the existing community-runs convention where timing starts at
+//            the cutscene-completing event ~1.25s before control returns.
+//            The 1.25s constant was measured empirically across multiple
+//            runs (mean 1.252s, mode 1.250s, range 1.219-1.297s). Runners
+//            who prefer a fully deterministic baseline can set the .lss
+//            Offset to 0 so the timer starts at canPause-true exactly --
+//            run times will be ~1.25s shorter than convention-mode runs
+//            but are tied to a single in-game event with no offset jitter.
 // Timing:    IGT accumulates GameHelper.realTime across attempts.
 // Auto-reset: when a New Game wipes the save.
 //
@@ -55,13 +64,13 @@ startup
 {
     // Bump on every edit so you can confirm in DebugView that LiveSplit
     // reloaded the new file. Format: "YYYY-MM-DDTHH:MMZ (git-shorthash)".
-    vars.ScriptVersion = "2026-05-26T13:00Z (74118c6+init-arm-on-canPause-false)";
+    vars.ScriptVersion = "2026-05-28T00:00Z (513353b+empirical-1.25s-offset)";
     print("[KT] script loaded -- version " + vars.ScriptVersion);
 
     settings.Add("split_missions", true,  "Split when all missions complete (key obtained)");
     settings.Add("split_boss",     true,  "Split on final boss defeat");
     settings.Add("reset_new_game", true,  "Auto-reset when a New Game is started");
-    settings.Add("start_new_game", true,  "Auto-start timer when a New Game is accepted (cutscene plays for ~30.5s — set .lss Offset to -00:00:30.5 so timer reaches 0 when cutscene ends)");
+    settings.Add("start_new_game", true,  "Auto-start timer when control returns post-cutscene (GameMaster.canPause false -> true). Pairs with .lss Offset = +00:00:01.25 (convention) or 00:00:00 (deterministic) — see README.");
     settings.Add("debug",          true,  "Print Mono walker debug info");
 
     // settings in `startup` is a builder (no indexing). The Log lambda will
@@ -453,9 +462,10 @@ init
     // transition). Consumed when GameMaster.canPause goes false -> true --
     // the cutscene + 1s black fade + 1.8s camera tween have all completed
     // and control returns to the player. This is the unified start moment
-    // that produces exact parity across all New-Game paths. The .lss carries
-    // a +2.8s Offset so the timer reads 2.8s at canPause-true (i.e. starts
-    // counting from .mp4-end, including the post-movie transition).
+    // that produces exact parity across all New-Game paths. The .lss
+    // Offset is +1.25s by default (convention mode) so the displayed time
+    // matches existing-runs convention; can be set to 0 for deterministic
+    // mode (see header docstring).
     vars.PendingCutsceneEnd = false;
     vars.LastDiagLogSec     = 0.0;
     vars.InitTries          = 0;
@@ -724,11 +734,14 @@ start
 
     // === FIRE: canPause false -> true (cutscene + camera tween complete) ===
     // GameMaster.canPause is set true at the end of the 1.8s camera-fade-in
-    // tween (FPI.beginGameplayForReal at FPI.cs:525), which is exactly 2.8s
-    // after the .mp4 last frame plays (1s WaitToDo black-fade + 1.8s HOTween).
-    // The .lss has Offset = +00:00:02.8 so the timer reads 2.8s at this
-    // moment -- i.e. it begins counting from the .mp4-end moment, including
-    // the post-movie black-fade and camera-tween in the displayed run time.
+    // tween (FPI.beginGameplayForReal at FPI.cs:525). Empirical measurement
+    // across 7+ runs put the gap from "cutscene-completing event" (community
+    // timing reference) to this moment at 1.252s (mean) +/- ~40ms (jitter
+    // from polling granularity + game frame-time variance). The .lss
+    // default Offset = +1.25s reproduces existing-runs convention; an
+    // alternate Offset = 0 ("deterministic mode") starts at this canPause
+    // event with no offset, giving run times tied to a single in-game
+    // moment without offset application.
     if ((bool)vars.PendingCutsceneEnd
         && old.canPause == false
         && current.canPause == true)

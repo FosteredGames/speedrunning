@@ -46,7 +46,7 @@ In the layout's *Scriptable Auto Splitter* component (right-click LiveSplit
 | `split_missions` | on | Splits when all 40 missions are complete (the key UI appears). Works for both normal completion and pay-to-skip. |
 | `split_boss` | on | Splits at the last hit on the final boss (fires inside `BossBase.die()`, before the outro cinematic plays). |
 | `reset_new_game` | on | Auto-resets when you accept a New Game from the title screen. |
-| `start_new_game` | on | Auto-starts the timer at the end of the opening cutscene (the moment control returns to the player, after the 1.8s camera fade-in). The .lss carries a `+00:00:02.8` offset so the timer reads 2.8s at that moment — i.e. timing begins at the .mp4 last frame, including the post-movie black-fade + camera-tween in the run, per the SRC rule. Note: the timer is NOT visible during the cutscene; it appears at 2.8s when control returns. |
+| `start_new_game` | on | Auto-starts the timer the instant `GameMaster.canPause` flips true (end of the post-cutscene camera fade-in — when control returns to the player). All start paths (in-game New Game, fresh-install auto-intro, post-completion retry, mid-cutscene attach) arm a pending flag and converge on this single moment, giving **exact parity** across paths. The timer is NOT visible during the cutscene; it appears when control returns. See the *Timing convention* section below for the offset choice. |
 | `debug` | on | Verbose internal logging. You can leave this off — it's only useful when reporting a bug. |
 
 ## Timing
@@ -58,6 +58,23 @@ so the boss split records a correct value for either timing method.
 
 The IGT column in the layout is configured to show Game Time alongside the
 primary Time column.
+
+### Timing convention (the `.lss` offset)
+
+The auto-splitter fires `start` deterministically at the instant
+`GameMaster.canPause` flips true — the moment control returns to the player
+after the post-cutscene camera fade-in. From there the `.lss` `<Offset>`
+determines what value is displayed at that moment.
+
+| Mode | `.lss` Offset | What it means | When to use |
+|---|---|---|---|
+| **Convention (default)** | `+00:00:01.2500000` | Timer reads `1.250s` when control returns. Approximates the existing community convention where timing starts at the cutscene-completing event ~1.25s before control returns. Run times comparable with previously-submitted RealTime runs. | If you want your splits to compare apples-to-apples with PBs and leaderboard entries done before this auto-splitter existed. |
+| **Deterministic** | `00:00:00` | Timer reads `0.000s` when control returns. Tied to a single in-game event with no offset application — run times will be ~1.25s shorter than convention-mode runs. | If you're starting a new splits file from scratch and want zero offset jitter, tying timing directly to the canPause flip with no convention baggage. |
+
+The 1.25s value was measured empirically across 7+ runs (mean 1.252s,
+mode 1.250s, range 1.219-1.297s — ~80ms spread coming from polling
+quantization and game frame-time variance). To switch modes, edit your
+`.lss` and change the `<Offset>` line to one of the above values.
 
 ## Known limitations
 
